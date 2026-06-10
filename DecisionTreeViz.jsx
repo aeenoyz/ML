@@ -1,0 +1,577 @@
+import React, { useState, useEffect, useMemo, useRef } from "react";
+
+/* ============================================================
+   결정트리 시각화 — 지니 불순도 기반 그리디 학습 + 추론 애니메이션
+   - 학습 데이터 7개 (전체 10개를 7:3으로 분할한 7)
+   - 후보 경계 = 각 특성에서 정렬된 인접 데이터값의 중앙값(midpoint).
+     7점의 x1·x2가 모두 다르면 뿌리에서 6+6 = 12개 후보가 생긴다.
+   - 각 노드에서 후보를 모두 검사 → 가중 지니 최소 조건 선택 → max_depth(1~6)
+   - 참 패턴은 중심 4 기준 XOR(사분면). 학습점 (7,7) 하나만 노이즈.
+   - 테스트 3개가 트리를 통과하며 분류되는 과정 애니메이션
+   ============================================================ */
+
+// ---- 색상/상수 ----
+const C0 = "#E0892B";   // 클래스 0 (호박색)
+const C1 = "#2E7C9C";   // 클래스 1 (청록)
+const ACCENT = "#7C5CDA"; // 진행/활성 (보라)
+const OK = "#2F9E68";    // 선택됨/정답
+const BAD = "#CF4A2C";   // 오답
+const INK = "#1b2433";
+const SUB = "#5a6478";
+const GRID = "#e4e8ef";
+const DMAX = 8;          // 특성 평면 범위 0..8
+
+// ---- 데이터 (검증 완료) ----
+const TRAIN = [
+  { id: "A", x1: 1, x2: 1, c: 0 },
+  { id: "B", x1: 2, x2: 2, c: 0 },
+  { id: "C", x1: 3, x2: 5, c: 1 },
+  { id: "D", x1: 4, x2: 3, c: 0 },
+  { id: "E", x1: 5, x2: 4, c: 1 },
+  { id: "F", x1: 6, x2: 6, c: 0 },
+  { id: "G", x1: 7, x2: 7, c: 1 },   // 노이즈 (참 XOR=0)
+];
+const TEST = [
+  { id: "T1", x1: 1.5, x2: 1.5, trueC: 0 },  // 좌하 — 모든 깊이 정답
+  { id: "T2", x1: 1.5, x2: 6.5, trueC: 1 },  // 좌상 — 모든 깊이 정답
+  { id: "T3", x1: 5.5, x2: 6.5, trueC: 0 },  // 우상 — 깊이1 언더핏(오답), 깊이2+ 정답
+];
+
+// ---- 지니 계산 ----
+const counts = (pts) => pts.reduce((a, p) => (a[p.c]++, a), [0, 0]);
+const gini = (cs) => {
+  const n = cs[0] + cs[1];
+  if (n === 0) return 0;
+  const p0 = cs[0] / n, p1 = cs[1] / n;
+  return 1 - p0 * p0 - p1 * p1;
+};
+const featVal = (p, f) => (f === "x1" ? p.x1 : p.x2);
+
+// ---- 트리 구성 ----
+let _uid = 0;
+function buildTree(pts, depth, bbox, maxDepth) {
+  const cs = counts(pts);
+  const g = gini(cs);
+  const node = {
+    id: "n" + _uid++, depth, pts, counts: cs, gini: g, bbox,
+    pred: cs[0] >= cs[1] ? 0 : 1,
+  };
+  if (depth >= maxDepth || g === 0 || pts.length <= 1) { node.leaf = true; return node; }
+
+  const n = pts.length;
+  // 후보 경계 = 각 특성에서 정렬된 인접 고유값의 중앙값
+  const cands = [];
+  ["x1", "x2"].forEach((f) => {
+    const vals = [...new Set(pts.map((p) => featVal(p, f)))].sort((a, b) => a - b);
+    for (let k = 0; k < vals.length - 1; k++) {
+      const t = (vals[k] + vals[k + 1]) / 2;
+      const L = pts.filter((p) => featVal(p, f) < t);
+      const R = pts.filter((p) => featVal(p, f) >= t);
+      const gL = gini(counts(L)), gR = gini(counts(R));
+      const w = (L.length / n) * gL + (R.length / n) * gR;
+      cands.push({ f, t, nL: L.length, nR: R.length, gL, gR, w, L, R });
+    }
+  });
+  let best = 0;
+  cands.forEach((c, i) => { if (c.w < cands[best].w - 1e-9) best = i; });
+  const bc = cands[best];
+  if (!bc || bc.nL === 0 || bc.nR === 0) { node.leaf = true; return node; }
+
+  node.cands = cands; node.best = best;
+  node.split = { f: bc.f, t: bc.t };
+  // 자식 영역(bbox) 계산 — 축 정렬 분할
+  let lb, rb;
+  if (bc.f === "x1") {
+    lb = { ...bbox, xmax: bc.t }; rb = { ...bbox, xmin: bc.t };
+  } else {
+    lb = { ...bbox, ymax: bc.t }; rb = { ...bbox, ymin: bc.t };
+  }
+  node.left = buildTree(bc.L, depth + 1, lb, maxDepth);
+  node.right = buildTree(bc.R, depth + 1, rb, maxDepth);
+  return node;
+}
+
+// ---- 트리 레이아웃 (리프 균등 배치) ----
+function layout(root) {
+  let slot = 0;
+  const place = (n) => {
+    if (n.leaf) { n.lx = slot++; }
+    else { place(n.left); place(n.right); n.lx = (n.left.lx + n.right.lx) / 2; }
+    n.ly = n.depth;
+  };
+  place(root);
+  return slot; // 리프 개수
+}
+
+// ---- 추론 경로 ----
+function traverse(root, p) {
+  const path = [];
+  let n = root;
+  while (true) {
+    if (n.leaf) { path.push({ node: n, leaf: true }); break; }
+    const goLeft = featVal(p, n.split.f) < n.split.t;
+    path.push({ node: n, leaf: false, goLeft, child: goLeft ? n.left : n.right });
+    n = goLeft ? n.left : n.right;
+  }
+  return path;
+}
+
+// ---- 스텝 생성 ----
+function buildSteps(root, maxDepth) {
+  const steps = [];
+  const committedSplits = []; const committedLeaves = []; const revealed = [root.id];
+  const snap = (extra) => ({
+    committedSplits: [...committedSplits], committedLeaves: [...committedLeaves],
+    revealed: [...revealed], ...extra,
+  });
+
+  // 학습 — 레벨 순서(BFS)
+  const q = [root];
+  while (q.length) {
+    const node = q.shift();
+    if (node.leaf) {
+      committedLeaves.push(node.id);
+      steps.push(snap({
+        phase: "train", kind: "leaf", nodeId: node.id, focus: node.pts.map((p) => p.id),
+        narr: `이 영역의 데이터 ${node.pts.length}개의 지니 불순도는 ${node.gini.toFixed(3)} 입니다. ` +
+          `${node.gini === 0 ? "한 클래스만 남아 더 나눌 수 없으므로" : (node.depth >= maxDepth ? `최대 깊이(${maxDepth})에 도달했으므로` : "더 나눌 수 없어")} ` +
+          `리프 노드로 확정하고 클래스 ${node.pred} 로 예측합니다.`,
+      }));
+      continue;
+    }
+    steps.push(snap({
+      phase: "train", kind: "arrive", nodeId: node.id, ledgerId: node.id, ledgerN: 0, cand: -1,
+      focus: node.pts.map((p) => p.id),
+      narr: `이 영역에 데이터 ${node.pts.length}개가 모여 있습니다 (지니 ${node.gini.toFixed(3)}). ` +
+        `정렬된 인접값의 중앙값 ${node.cands.length}개를 후보 경계로 삼아 하나씩 가중 지니 불순도를 계산합니다.`,
+    }));
+    node.cands.forEach((c, k) => {
+      let bs = 0; for (let i = 1; i <= k; i++) if (node.cands[i].w < node.cands[bs].w - 1e-9) bs = i;
+      steps.push(snap({
+        phase: "train", kind: "cand", nodeId: node.id, ledgerId: node.id, ledgerN: k + 1, cand: k, bestSoFar: bs,
+        focus: node.pts.map((p) => p.id),
+        narr: `후보 ${c.f} < ${c.t} : 왼쪽 ${c.nL}개·오른쪽 ${c.nR}개로 나뉩니다. ` +
+          `가중 지니 = (${c.nL}/${node.pts.length})·${c.gL.toFixed(3)} + (${c.nR}/${node.pts.length})·${c.gR.toFixed(3)} = ${c.w.toFixed(3)}.`,
+      }));
+    });
+    committedSplits.push(node.id);
+    revealed.push(node.left.id, node.right.id);
+    const bc = node.cands[node.best];
+    steps.push(snap({
+      phase: "train", kind: "choose", nodeId: node.id, ledgerId: node.id, ledgerN: node.cands.length, cand: node.best,
+      focus: node.pts.map((p) => p.id),
+      narr: `후보 ${node.cands.length}개 중 가중 지니가 가장 낮은 「${bc.f} < ${bc.t}」 (${bc.w.toFixed(3)}) 을 분기 조건으로 선택했습니다. ` +
+        `이 영역을 둘로 나눕니다.`,
+    }));
+    q.push(node.left, node.right);
+  }
+
+  // 추론 전환
+  const allSplits = []; const allLeaves = []; const allRev = [];
+  (function walk(n) { allRev.push(n.id); if (n.leaf) allLeaves.push(n.id); else { allSplits.push(n.id); walk(n.left); walk(n.right); } })(root);
+  const fullSnap = (extra) => ({ committedSplits: [...allSplits], committedLeaves: [...allLeaves], revealed: [...allRev], ...extra });
+
+  // 학습 정확도
+  const trainAcc = TRAIN.reduce((a, p) => a + (traverse(root, p)[traverse(root, p).length - 1].node.pred === p.c ? 1 : 0), 0);
+
+  steps.push(fullSnap({
+    phase: "train", kind: "done",
+    narr: `학습 완료! max_depth=${maxDepth} 트리는 분할 ${allSplits.length}개로 평면을 ${allLeaves.length}개 영역으로 나눴고, 학습 데이터를 ${trainAcc}/7 맞혔습니다. ` +
+      `이제 처음 떼어둔 테스트 데이터 3개를 통과시켜 봅니다.`,
+  }));
+
+  // 추론
+  let correct = 0;
+  TEST.forEach((t) => {
+    const path = traverse(root, t);
+    steps.push(fullSnap({
+      phase: "infer", kind: "place", testId: t.id, tokenNode: root.id,
+      narr: `테스트 데이터 ${t.id} (x1=${t.x1}, x2=${t.x2}) 를 뿌리 노드에 넣습니다.`,
+    }));
+    path.forEach((step) => {
+      if (step.leaf) return;
+      const v = featVal(t, step.node.split.f);
+      const yes = step.goLeft;
+      steps.push(fullSnap({
+        phase: "infer", kind: "eval", testId: t.id, tokenNode: step.node.id, edgeChild: step.child.id,
+        narr: `조건 「${step.node.split.f} < ${step.node.split.t}」 검사: ${step.node.split.f}=${v} 이므로 ${v} < ${step.node.split.t} → ` +
+          `${yes ? "참 → 왼쪽" : "거짓 → 오른쪽"} 으로 이동합니다.`,
+      }));
+      steps.push(fullSnap({
+        phase: "infer", kind: "move", testId: t.id, tokenNode: step.child.id, edgeChild: step.child.id,
+        narr: `${yes ? "왼쪽" : "오른쪽"} 자식 노드로 내려갑니다.`,
+      }));
+    });
+    const leaf = path[path.length - 1].node;
+    const ok = leaf.pred === t.trueC;
+    if (ok) correct++;
+    steps.push(fullSnap({
+      phase: "infer", kind: "result", testId: t.id, tokenNode: leaf.id,
+      pred: leaf.pred, trueC: t.trueC, ok,
+      narr: `리프에 도착했습니다. 예측 = 클래스 ${leaf.pred}. 실제 정답 = 클래스 ${t.trueC}. ` +
+        `${ok ? "정확히 분류했습니다 ✓"
+              : (leaf.counts[0] === 0 || leaf.counts[1] === 0)
+                ? "오분류입니다 ✗ — 이 리프는 학습 데이터 한 클래스만으로 만들어졌는데(깊은 가지일수록 소수 데이터에 민감), 새 데이터와 맞지 않았습니다."
+                : "오분류입니다 ✗ — 이 리프는 학습 데이터가 섞여 있어 다수결로 예측했고, 새 데이터와 맞지 않았습니다."}`,
+    }));
+  });
+  steps.push(fullSnap({
+    phase: "infer", kind: "summary",
+    narr: maxDepth === 1
+      ? `깊이 1 트리는 분할 ${allSplits.length}개뿐이라 이 패턴(사분면 XOR)을 담기엔 너무 단순합니다 — 학습 ${trainAcc}/7, 테스트 ${correct}/3 로 언더피팅(과소적합)이 나타나 테스트를 틀립니다. 깊이를 키워 보세요.`
+      : `테스트 정확도 = ${correct}/3 (학습 ${trainAcc}/7, 분할 ${allSplits.length}개). 깊이를 늘릴수록 분할이 많아져 트리는 점점 복잡해지고 학습 데이터는 더 정확해지지만, ` +
+        `테스트 정확도는 깊이 2 이후로 더 오르지 않습니다 — 복잡도를 키워도 일반화 성능엔 이득이 없습니다. (학습 데이터를 모두 외우고 나면 더 나눌 게 없어, 그보다 깊이 허용해도 트리는 그대로입니다.)`,
+  }));
+
+  return steps;
+}
+
+// ---- 평면 좌표 변환 ----
+const PW = 380, PH = 380, PADL = 40, PADR = 18, PADT = 16, PADB = 36;
+const sx = (x) => PADL + (x / DMAX) * (PW - PADL - PADR);
+const sy = (y) => (PH - PADB) - (y / DMAX) * (PH - PADB - PADT);
+
+// 후보/확정 경계 선분 (bbox로 클리핑)
+function boundaryLine(f, t, bbox) {
+  if (f === "x1") return { x1: sx(t), y1: sy(bbox.ymin), x2: sx(t), y2: sy(bbox.ymax) };
+  return { x1: sx(bbox.xmin), y1: sy(t), x2: sx(bbox.xmax), y2: sy(t) };
+}
+
+export default function DecisionTreeViz() {
+  const [maxDepth, setMaxDepth] = useState(3);
+  const { root, steps, leafCount, treeDepth } = useMemo(() => {
+    _uid = 0;
+    const r = buildTree(TRAIN, 0, { xmin: 0, xmax: DMAX, ymin: 0, ymax: DMAX }, maxDepth);
+    const lc = layout(r);
+    let td = 0; (function w(n) { td = Math.max(td, n.depth); if (!n.leaf) { w(n.left); w(n.right); } })(r);
+    return { root: r, steps: buildSteps(r, maxDepth), leafCount: lc, treeDepth: td };
+  }, [maxDepth]);
+  const nodeById = useMemo(() => {
+    const m = {}; (function w(n) { m[n.id] = n; if (!n.leaf) { w(n.left); w(n.right); } })(root); return m;
+  }, [root]);
+
+  const [i, setI] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(900);
+  const timer = useRef(null);
+  const idx = Math.min(i, steps.length - 1);
+  const s = steps[idx];
+
+  const changeDepth = (d) => { setPlaying(false); setI(0); setMaxDepth(d); };
+
+  useEffect(() => {
+    if (!playing) return;
+    if (idx >= steps.length - 1) { setPlaying(false); return; }
+    timer.current = setTimeout(() => setI((x) => Math.min(x + 1, steps.length - 1)), s.kind === "cand" ? speed * 0.7 : speed);
+    return () => clearTimeout(timer.current);
+  }, [playing, idx, speed, steps.length, s]);
+
+  const go = (d) => { setPlaying(false); setI((x) => Math.min(Math.max(x + d, 0), steps.length - 1)); };
+  const reset = () => { setPlaying(false); setI(0); };
+
+  const ledgerNode = s.ledgerId ? nodeById[s.ledgerId] : null;
+  const focus = new Set(s.focus || []);
+  const committedSplits = new Set(s.committedSplits);
+  const committedLeaves = new Set(s.committedLeaves);
+  const revealed = new Set(s.revealed);
+  const activeTest = s.testId ? TEST.find((t) => t.id === s.testId) : null;
+
+  // 트리 픽셀 좌표 (깊이/리프 수에 따라 가변)
+  const TROW = 92, TCOLW = 116, TMX = 56, TMY = 36, BW = 92, BH = 50;
+  const tx = (n) => TMX + n.lx * TCOLW;
+  const ty = (n) => TMY + n.ly * TROW + BH / 2;
+  const TW = TMX * 2 + (leafCount - 1) * TCOLW;
+  const TH = TMY * 2 + treeDepth * TROW + BH;
+
+  return (
+    <div className="dtv">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap');
+        .dtv{ --c0:${C0}; --c1:${C1}; --ac:${ACCENT}; --ok:${OK}; --bad:${BAD}; --ink:${INK}; --sub:${SUB};
+          font-family:'Inter',system-ui,sans-serif; color:var(--ink); background:#f6f7f9;
+          padding:18px; border-radius:16px; max-width:1180px; margin:0 auto; }
+        .dtv *{ box-sizing:border-box; }
+        .dtv h1{ font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:21px; margin:0; letter-spacing:-.01em; }
+        .mono{ font-family:'JetBrains Mono',monospace; font-variant-numeric:tabular-nums; }
+        .eyebrow{ font-family:'JetBrains Mono',monospace; font-size:11px; letter-spacing:.16em; text-transform:uppercase; color:var(--sub); }
+        .card{ background:#fff; border:1px solid #e7eaf0; border-radius:13px; }
+        .grid{ display:grid; grid-template-columns:minmax(290px,0.8fr) minmax(540px,1.75fr); gap:14px; align-items:start; }
+        @media(max-width:980px){ .grid{ grid-template-columns:1fr; } }
+        .pair{ display:grid; grid-template-columns:1fr 1.05fr; gap:14px; align-items:start; }
+        @media(max-width:980px){ .pair{ grid-template-columns:1fr; } }
+        .narr{ background:linear-gradient(180deg,#fbfaff,#fff); border:1px solid #e7e2f7; border-left:4px solid var(--ac);
+          border-radius:11px; padding:13px 15px; font-size:14.5px; line-height:1.6; min-height:64px; }
+        .btn{ font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:13px; border:1px solid #d6dbe4; background:#fff;
+          color:var(--ink); padding:8px 13px; border-radius:9px; cursor:pointer; transition:.15s; }
+        .btn:hover{ border-color:var(--ac); color:var(--ac); }
+        .btn.primary{ background:var(--ac); color:#fff; border-color:var(--ac); }
+        .btn.primary:hover{ filter:brightness(1.06); color:#fff; }
+        .btn:disabled{ opacity:.4; cursor:default; }
+        table.ledger{ width:100%; border-collapse:collapse; font-size:12px; }
+        table.ledger th{ font-family:'JetBrains Mono',monospace; font-size:10px; letter-spacing:.03em; text-transform:uppercase;
+          color:var(--sub); font-weight:500; text-align:right; padding:4px 6px; border-bottom:1px solid #eceef3; white-space:nowrap; }
+        table.ledger th:first-child{ text-align:left; }
+        table.ledger td{ padding:4px 6px; text-align:right; border-bottom:1px solid #f2f3f7; white-space:nowrap; }
+        table.ledger td:first-child{ text-align:left; }
+        .row-active{ background:#f3eeff; }
+        .row-best td{ font-weight:700; }
+        .pill{ display:inline-flex; align-items:center; gap:5px; font-size:12px; padding:3px 9px; border-radius:20px; font-weight:600; }
+        .seg{ display:inline-flex; border:1px solid #e0e4ec; border-radius:9px; overflow:hidden; }
+        .seg span{ padding:6px 11px; font-size:12.5px; font-weight:600; font-family:'Space Grotesk',sans-serif; }
+        input[type=range]{ accent-color:var(--ac); }
+      `}</style>
+
+      {/* 헤더 */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <div className="eyebrow">Gini Impurity · Greedy Splitting · max_depth = {maxDepth}</div>
+          <h1>결정트리가 만들어지는 과정</h1>
+        </div>
+        <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span className="eyebrow" style={{ letterSpacing: ".08em" }}>최대 깊이</span>
+            <div className="seg">
+              {[1, 2, 3, 4, 5, 6].map((d) => (
+                <span key={d} onClick={() => changeDepth(d)} style={{
+                  cursor: "pointer", background: maxDepth === d ? INK : "#fff",
+                  color: maxDepth === d ? "#fff" : SUB, borderRight: d < 6 ? "1px solid #e0e4ec" : "none",
+                  padding: "6px 10px",
+                }}>{d}</span>
+              ))}
+            </div>
+          </div>
+          <div className="seg">
+            <span style={{ background: s.phase === "train" ? ACCENT : "#fff", color: s.phase === "train" ? "#fff" : SUB }}>① 학습</span>
+            <span style={{ background: s.phase === "infer" ? ACCENT : "#fff", color: s.phase === "infer" ? "#fff" : SUB }}>② 추론</span>
+          </div>
+        </div>
+      </div>
+
+      {/* 내레이션 */}
+      <div className="narr" style={{ marginBottom: 14 }}>{s.narr}</div>
+
+      <div className="grid">
+        {/* ===== 왼쪽: 2D 평면 ===== */}
+        <div className="card" style={{ padding: 12 }}>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>특성 평면 (x1, x2)</div>
+          <svg viewBox={`0 0 ${PW} ${PH}`} style={{ width: "100%", display: "block" }}>
+            {/* 격자 */}
+            {[...Array(DMAX + 1)].map((_, k) => (
+              <g key={k}>
+                <line x1={sx(k)} y1={sy(0)} x2={sx(k)} y2={sy(DMAX)} stroke={GRID} strokeWidth={k % 4 === 0 ? 1.2 : 0.6} />
+                <line x1={sx(0)} y1={sy(k)} x2={sx(DMAX)} y2={sy(k)} stroke={GRID} strokeWidth={k % 4 === 0 ? 1.2 : 0.6} />
+              </g>
+            ))}
+            <line x1={sx(0)} y1={sy(0)} x2={sx(DMAX)} y2={sy(0)} stroke="#aab2c2" strokeWidth={1.2} />
+            <line x1={sx(0)} y1={sy(0)} x2={sx(0)} y2={sy(DMAX)} stroke="#aab2c2" strokeWidth={1.2} />
+            <text x={sx(DMAX)} y={sy(0) + 22} textAnchor="end" fontSize="11" fill={SUB} className="mono">x1 →</text>
+            <text x={sx(0) - 28} y={sy(DMAX) + 3} fontSize="11" fill={SUB} className="mono">x2↑</text>
+
+            {/* 확정 리프 영역 음영 */}
+            {[...committedLeaves].map((id) => {
+              const n = nodeById[id]; const b = n.bbox;
+              return <rect key={"r" + id} x={sx(b.xmin)} y={sy(b.ymax)} width={sx(b.xmax) - sx(b.xmin)} height={sy(b.ymin) - sy(b.ymax)}
+                fill={n.pred === 0 ? C0 : C1} opacity={0.12} />;
+            })}
+
+            {/* 확정된 분기 경계 (실선) */}
+            {[...committedSplits].map((id) => {
+              const n = nodeById[id]; const l = boundaryLine(n.split.f, n.split.t, n.bbox);
+              return <line key={"b" + id} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} stroke={INK} strokeWidth={2.2} strokeLinecap="round" />;
+            })}
+
+            {/* 현재 검사 중인 후보 경계 (보라 점선) */}
+            {s.kind === "cand" && ledgerNode && (() => {
+              const c = ledgerNode.cands[s.cand]; const l = boundaryLine(c.f, c.t, ledgerNode.bbox);
+              return <line x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} stroke={ACCENT} strokeWidth={2.6} strokeDasharray="6 5" strokeLinecap="round">
+                <animate attributeName="opacity" values="0.4;1;0.4" dur="1.1s" repeatCount="indefinite" /></line>;
+            })()}
+            {s.kind === "choose" && ledgerNode && (() => {
+              const c = ledgerNode.cands[ledgerNode.best]; const l = boundaryLine(c.f, c.t, ledgerNode.bbox);
+              return <line x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} stroke={OK} strokeWidth={3} strokeLinecap="round" />;
+            })()}
+
+            {/* 학습 데이터 점 */}
+            {TRAIN.map((p) => {
+              const isFocus = (s.phase === "train" && (s.kind === "arrive" || s.kind === "cand" || s.kind === "choose"));
+              const inNode = focus.has(p.id);
+              const dim = isFocus && !inNode;
+              return (
+                <g key={p.id} opacity={dim ? 0.22 : 1}>
+                  {isFocus && inNode && <circle cx={sx(p.x1)} cy={sy(p.x2)} r={10} fill="none" stroke={ACCENT} strokeWidth={1.6} />}
+                  <circle cx={sx(p.x1)} cy={sy(p.x2)} r={6.5} fill={p.c === 0 ? C0 : C1} stroke="#fff" strokeWidth={1.6} />
+                </g>
+              );
+            })}
+
+            {/* 테스트 데이터 점 (추론 단계) */}
+            {s.phase === "infer" && TEST.map((t) => {
+              const act = activeTest && activeTest.id === t.id;
+              const done = s.kind === "result" && act;
+              const col = done ? (t.trueC === 0 ? C0 : C1) : "#fff";
+              return (
+                <g key={t.id} opacity={act || s.kind === "summary" ? 1 : 0.45}>
+                  <rect x={sx(t.x1) - 6} y={sy(t.x2) - 6} width={12} height={12} transform={`rotate(45 ${sx(t.x1)} ${sy(t.x2)})`}
+                    fill={col} stroke={act ? ACCENT : "#8b94a6"} strokeWidth={2} />
+                  <text x={sx(t.x1) + 10} y={sy(t.x2) - 8} fontSize="11" className="mono" fill={INK}>{t.id}</text>
+                  {act && <circle cx={sx(t.x1)} cy={sy(t.x2)} r={13} fill="none" stroke={ACCENT} strokeWidth={1.4}>
+                    <animate attributeName="r" values="11;17;11" dur="1.3s" repeatCount="indefinite" />
+                    <animate attributeName="opacity" values="0.8;0;0.8" dur="1.3s" repeatCount="indefinite" /></circle>}
+                </g>
+              );
+            })}
+          </svg>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, marginTop: 4, color: SUB }}>
+            <span className="pill" style={{ background: "#fdf2e6", color: "#a85f10" }}><b style={{ width: 9, height: 9, borderRadius: 9, background: C0, display: "inline-block" }} />클래스 0</span>
+            <span className="pill" style={{ background: "#e8f2f6", color: "#1f5c75" }}><b style={{ width: 9, height: 9, borderRadius: 9, background: C1, display: "inline-block" }} />클래스 1</span>
+            <span className="mono" style={{ alignSelf: "center" }}>◇ 테스트 데이터</span>
+          </div>
+        </div>
+
+        {/* ===== 오른쪽: 트리 + 지니 원장 ===== */}
+        <div className="pair">
+          {/* 트리 */}
+          <div className="card" style={{ padding: 12 }}>
+            <div className="eyebrow" style={{ marginBottom: 6 }}>결정트리</div>
+            <svg viewBox={`0 0 ${TW} ${TH}`} style={{ width: "100%", display: "block" }}>
+              {/* 간선 */}
+              {Object.values(nodeById).filter((n) => !n.leaf).map((n) =>
+                [["left", n.left, "예 (<)"], ["right", n.right, "아니오 (≥)"]].map(([k, ch, lab]) => {
+                  if (!revealed.has(ch.id) || !committedSplits.has(n.id)) return null;
+                  const x1 = tx(n), y1 = ty(n) + BH / 2, x2 = tx(ch), y2 = ty(ch) - BH / 2;
+                  const onPath = s.phase === "infer" && s.edgeChild === ch.id;
+                  return (
+                    <g key={n.id + k}>
+                      <path d={`M${x1},${y1} C ${x1},${(y1 + y2) / 2} ${x2},${(y1 + y2) / 2} ${x2},${y2}`}
+                        fill="none" stroke={onPath ? ACCENT : "#c2c9d6"} strokeWidth={onPath ? 3 : 1.6} />
+                      <text x={(x1 + x2) / 2} y={(y1 + y2) / 2} textAnchor="middle" fontSize="10.5" className="mono"
+                        fill={onPath ? ACCENT : SUB} style={{ paintOrder: "stroke" }} stroke="#fff" strokeWidth={3}>{lab}</text>
+                    </g>
+                  );
+                })
+              )}
+              {/* 노드 */}
+              {Object.values(nodeById).map((n) => {
+                if (!revealed.has(n.id)) return null;
+                const x = tx(n), y = ty(n);
+                const isLeaf = n.leaf && committedLeaves.has(n.id);
+                const isSplit = !n.leaf && committedSplits.has(n.id);
+                const active = (s.phase === "train" && s.nodeId === n.id) || (s.phase === "infer" && s.tokenNode === n.id);
+                const fill = isLeaf ? (n.pred === 0 ? "#fdf2e6" : "#e8f2f6") : "#fff";
+                const stroke = active ? ACCENT : (isLeaf ? (n.pred === 0 ? C0 : C1) : "#d3d9e3");
+                return (
+                  <g key={n.id}>
+                    <rect x={x - BW / 2} y={y - BH / 2} width={BW} height={BH} rx={9} fill={fill} stroke={stroke} strokeWidth={active ? 2.6 : 1.5} />
+                    {/* 클래스 카운트 */}
+                    <g className="mono">
+                      <circle cx={x - 22} cy={y - 9} r={4} fill={C0} /><text x={x - 14} y={y - 5} fontSize="11" fill={INK}>{n.counts[0]}</text>
+                      <circle cx={x + 6} cy={y - 9} r={4} fill={C1} /><text x={x + 14} y={y - 5} fontSize="11" fill={INK}>{n.counts[1]}</text>
+                    </g>
+                    {isSplit
+                      ? <text x={x} y={y + 13} textAnchor="middle" fontSize="11.5" fontWeight="700" className="mono" fill={INK}>{n.split.f} &lt; {n.split.t}</text>
+                      : isLeaf
+                        ? <text x={x} y={y + 13} textAnchor="middle" fontSize="10.5" fontWeight="700" fill={n.pred === 0 ? "#a85f10" : "#1f5c75"}>예측: 클래스 {n.pred}</text>
+                        : <text x={x} y={y + 13} textAnchor="middle" fontSize="11" className="mono" fill={SUB}>지니 {n.gini.toFixed(2)}</text>}
+                  </g>
+                );
+              })}
+              {/* 추론 토큰 */}
+              {s.phase === "infer" && s.tokenNode && activeTest && (() => {
+                const n = nodeById[s.tokenNode];
+                return (
+                  <g style={{ transition: "all .5s ease" }}>
+                    <rect x={tx(n) - 7} y={ty(n) - BH / 2 - 18} width={14} height={14} transform={`rotate(45 ${tx(n)} ${ty(n) - BH / 2 - 11})`}
+                      fill={ACCENT} stroke="#fff" strokeWidth={2} />
+                    <text x={tx(n) + 14} y={ty(n) - BH / 2 - 7} fontSize="10.5" className="mono" fontWeight="600" fill={ACCENT}>{activeTest.id}</text>
+                  </g>
+                );
+              })()}
+            </svg>
+          </div>
+
+          {/* 지니 원장 (학습) / 결과 카드 (추론) */}
+          <div className="card" style={{ padding: 12, minHeight: 150, overflowX: "auto" }}>
+            {s.phase === "train" && ledgerNode ? (
+              <>
+                <div className="eyebrow" style={{ marginBottom: 6 }}>지니 불순도 계산 — 후보 {ledgerNode.cands.length}개 검사</div>
+                <table className="ledger">
+                  <thead><tr><th>조건</th><th>n_L</th><th>n_R</th><th>G_L</th><th>G_R</th><th>가중 지니</th></tr></thead>
+                  <tbody>
+                    {ledgerNode.cands.map((c, k) => {
+                      const shown = k < s.ledgerN;
+                      const isActive = s.kind === "cand" && s.cand === k;
+                      const isBest = (s.kind === "cand" && s.bestSoFar === k && shown) || (s.kind === "choose" && k === ledgerNode.best);
+                      return (
+                        <tr key={k} className={`${isActive ? "row-active" : ""} ${isBest ? "row-best" : ""}`} style={{ opacity: shown ? 1 : 0.25 }}>
+                          <td className="mono">{c.f} &lt; {c.t} {isBest && <span style={{ color: OK }}>★</span>}</td>
+                          <td className="mono">{shown ? c.nL : "·"}</td>
+                          <td className="mono">{shown ? c.nR : "·"}</td>
+                          <td className="mono">{shown ? c.gL.toFixed(3) : "·"}</td>
+                          <td className="mono">{shown ? c.gR.toFixed(3) : "·"}</td>
+                          <td className="mono" style={{ color: isBest ? OK : INK }}>{shown ? c.w.toFixed(3) : "·"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <div style={{ fontSize: 11.5, color: SUB, marginTop: 8 }} className="mono">
+                  G = 1 − Σpᵢ² · 가중지니 = (n_L/n)·G_L + (n_R/n)·G_R · 최소값 선택
+                </div>
+              </>
+            ) : s.phase === "train" ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, paddingTop: 6, fontSize: 13.5, color: SUB }}>
+                <span className="pill" style={{ background: "#eef0f5", color: SUB }}>{s.kind === "done" ? "학습 완료" : "리프 노드 확정"}</span>
+                <span className="mono">{s.kind === "done" ? `${leafCount}개 영역 · ${leafCount - 1}개 분기 · max_depth=${maxDepth}` : "한 클래스로 결정됨 → 분기 종료"}</span>
+              </div>
+            ) : s.phase === "infer" && (s.kind === "result" || s.kind === "eval" || s.kind === "move" || s.kind === "place") && activeTest ? (
+              <>
+                <div className="eyebrow" style={{ marginBottom: 8 }}>분류 진행 — {activeTest.id}</div>
+                <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center" }}>
+                  <div className="mono" style={{ fontSize: 13 }}>입력 (x1={activeTest.x1}, x2={activeTest.x2})</div>
+                  {s.kind === "result" && <>
+                    <span className="pill" style={{ background: s.pred === 0 ? "#fdf2e6" : "#e8f2f6", color: s.pred === 0 ? "#a85f10" : "#1f5c75" }}>예측 클래스 {s.pred}</span>
+                    <span className="mono" style={{ fontSize: 13 }}>실제 {s.trueC}</span>
+                    <span className="pill" style={{ background: s.ok ? "#e6f4ec" : "#fae8e3", color: s.ok ? OK : BAD }}>{s.ok ? "정답 ✓" : "오답 ✗"}</span>
+                  </>}
+                </div>
+              </>
+            ) : (
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", paddingTop: 4 }}>
+                {TEST.map((t) => {
+                  const path = traverse(root, t); const leaf = path[path.length - 1].node; const ok = leaf.pred === t.trueC;
+                  const shownResult = s.kind === "summary";
+                  return (
+                    <div key={t.id} style={{ border: "1px solid #eceef3", borderRadius: 10, padding: "9px 12px", fontSize: 12.5 }} className="mono">
+                      <b>{t.id}</b> (x1={t.x1},x2={t.x2})
+                      {shownResult && <div style={{ marginTop: 3, color: ok ? OK : BAD }}>예측 {leaf.pred} / 실제 {t.trueC} {ok ? "✓" : "✗"}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ===== 컨트롤 ===== */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 16 }}>
+        <button className="btn" onClick={reset} disabled={idx === 0}>⟲ 처음</button>
+        <button className="btn" onClick={() => go(-1)} disabled={idx === 0}>◀ 이전</button>
+        <button className="btn primary" onClick={() => { if (idx >= steps.length - 1) setI(0); setPlaying((p) => !p); }} style={{ minWidth: 92 }}>
+          {playing ? "⏸ 일시정지" : (idx >= steps.length - 1 ? "↻ 다시" : "▶ 재생")}
+        </button>
+        <button className="btn" onClick={() => go(1)} disabled={idx >= steps.length - 1}>다음 ▶</button>
+        <div style={{ flex: 1, minWidth: 130, display: "flex", alignItems: "center", gap: 8 }}>
+          <span className="mono" style={{ fontSize: 11, color: SUB }}>느리게</span>
+          <input type="range" min="300" max="1600" step="100" value={1900 - speed} onChange={(e) => setSpeed(1900 - +e.target.value)} style={{ flex: 1 }} />
+          <span className="mono" style={{ fontSize: 11, color: SUB }}>빠르게</span>
+        </div>
+        <span className="mono" style={{ fontSize: 12, color: SUB }}>단계 {idx + 1} / {steps.length}</span>
+      </div>
+      {/* 진행 바 */}
+      <div style={{ height: 4, background: "#e7eaf0", borderRadius: 4, marginTop: 8, overflow: "hidden" }}>
+        <div style={{ height: "100%", width: `${(idx / (steps.length - 1)) * 100}%`, background: ACCENT, transition: "width .3s" }} />
+      </div>
+    </div>
+  );
+}
