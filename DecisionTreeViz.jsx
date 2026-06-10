@@ -1,27 +1,22 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+// 1. 맨 위 import 구문을 지우고, CDN용 구조분해 할당으로 변경합니다.
+const { useState, useEffect, useMemo, useRef } = React;
 
 /* ============================================================
    결정트리 시각화 — 지니 불순도 기반 그리디 학습 + 추론 애니메이션
-   - 학습 데이터 7개 (전체 10개를 7:3으로 분할한 7)
-   - 후보 경계 = 각 특성에서 정렬된 인접 데이터값의 중앙값(midpoint).
-     7점의 x1·x2가 모두 다르면 뿌리에서 6+6 = 12개 후보가 생긴다.
-   - 각 노드에서 후보를 모두 검사 → 가중 지니 최소 조건 선택 → max_depth(1~6)
-   - 참 패턴은 중심 4 기준 XOR(사분면). 학습점 (7,7) 하나만 노이즈.
-   - 테스트 3개가 트리를 통과하며 분류되는 과정 애니메이션
    ============================================================ */
 
 // ---- 색상/상수 ----
-const C0 = "#E0892B";   // 클래스 0 (호박색)
-const C1 = "#2E7C9C";   // 클래스 1 (청록)
-const ACCENT = "#7C5CDA"; // 진행/활성 (보라)
-const OK = "#2F9E68";    // 선택됨/정답
-const BAD = "#CF4A2C";   // 오답
+const C0 = "#E0892B";   
+const C1 = "#2E7C9C";   
+const ACCENT = "#7C5CDA"; 
+const OK = "#2F9E68";    
+const BAD = "#CF4A2C";   
 const INK = "#1b2433";
 const SUB = "#5a6478";
 const GRID = "#e4e8ef";
-const DMAX = 8;          // 특성 평면 범위 0..8
+const DMAX = 8;          
 
-// ---- 데이터 (검증 완료) ----
+// ---- 데이터 ----
 const TRAIN = [
   { id: "A", x1: 1, x2: 1, c: 0 },
   { id: "B", x1: 2, x2: 2, c: 0 },
@@ -29,12 +24,12 @@ const TRAIN = [
   { id: "D", x1: 4, x2: 3, c: 0 },
   { id: "E", x1: 5, x2: 4, c: 1 },
   { id: "F", x1: 6, x2: 6, c: 0 },
-  { id: "G", x1: 7, x2: 7, c: 1 },   // 노이즈 (참 XOR=0)
+  { id: "G", x1: 7, x2: 7, c: 1 },   
 ];
 const TEST = [
-  { id: "T1", x1: 1.5, x2: 1.5, trueC: 0 },  // 좌하 — 모든 깊이 정답
-  { id: "T2", x1: 1.5, x2: 6.5, trueC: 1 },  // 좌상 — 모든 깊이 정답
-  { id: "T3", x1: 5.5, x2: 6.5, trueC: 0 },  // 우상 — 깊이1 언더핏(오답), 깊이2+ 정답
+  { id: "T1", x1: 1.5, x2: 1.5, trueC: 0 },  
+  { id: "T2", x1: 1.5, x2: 6.5, trueC: 1 },  
+  { id: "T3", x1: 5.5, x2: 6.5, trueC: 0 },  
 ];
 
 // ---- 지니 계산 ----
@@ -59,7 +54,6 @@ function buildTree(pts, depth, bbox, maxDepth) {
   if (depth >= maxDepth || g === 0 || pts.length <= 1) { node.leaf = true; return node; }
 
   const n = pts.length;
-  // 후보 경계 = 각 특성에서 정렬된 인접 고유값의 중앙값
   const cands = [];
   ["x1", "x2"].forEach((f) => {
     const vals = [...new Set(pts.map((p) => featVal(p, f)))].sort((a, b) => a - b);
@@ -79,7 +73,6 @@ function buildTree(pts, depth, bbox, maxDepth) {
 
   node.cands = cands; node.best = best;
   node.split = { f: bc.f, t: bc.t };
-  // 자식 영역(bbox) 계산 — 축 정렬 분할
   let lb, rb;
   if (bc.f === "x1") {
     lb = { ...bbox, xmax: bc.t }; rb = { ...bbox, xmin: bc.t };
@@ -91,7 +84,7 @@ function buildTree(pts, depth, bbox, maxDepth) {
   return node;
 }
 
-// ---- 트리 레이아웃 (리프 균등 배치) ----
+// ---- 트리 레이아웃 ----
 function layout(root) {
   let slot = 0;
   const place = (n) => {
@@ -100,7 +93,7 @@ function layout(root) {
     n.ly = n.depth;
   };
   place(root);
-  return slot; // 리프 개수
+  return slot; 
 }
 
 // ---- 추론 경로 ----
@@ -125,7 +118,6 @@ function buildSteps(root, maxDepth) {
     revealed: [...revealed], ...extra,
   });
 
-  // 학습 — 레벨 순서(BFS)
   const q = [root];
   while (q.length) {
     const node = q.shift();
@@ -166,12 +158,10 @@ function buildSteps(root, maxDepth) {
     q.push(node.left, node.right);
   }
 
-  // 추론 전환
   const allSplits = []; const allLeaves = []; const allRev = [];
   (function walk(n) { allRev.push(n.id); if (n.leaf) allLeaves.push(n.id); else { allSplits.push(n.id); walk(n.left); walk(n.right); } })(root);
   const fullSnap = (extra) => ({ committedSplits: [...allSplits], committedLeaves: [...allLeaves], revealed: [...allRev], ...extra });
 
-  // 학습 정확도
   const trainAcc = TRAIN.reduce((a, p) => a + (traverse(root, p)[traverse(root, p).length - 1].node.pred === p.c ? 1 : 0), 0);
 
   steps.push(fullSnap({
@@ -180,7 +170,6 @@ function buildSteps(root, maxDepth) {
       `이제 처음 떼어둔 테스트 데이터 3개를 통과시켜 봅니다.`,
   }));
 
-  // 추론
   let correct = 0;
   TEST.forEach((t) => {
     const path = traverse(root, t);
@@ -231,13 +220,13 @@ const PW = 380, PH = 380, PADL = 40, PADR = 18, PADT = 16, PADB = 36;
 const sx = (x) => PADL + (x / DMAX) * (PW - PADL - PADR);
 const sy = (y) => (PH - PADB) - (y / DMAX) * (PH - PADB - PADT);
 
-// 후보/확정 경계 선분 (bbox로 클리핑)
 function boundaryLine(f, t, bbox) {
   if (f === "x1") return { x1: sx(t), y1: sy(bbox.ymin), x2: sx(t), y2: sy(bbox.ymax) };
   return { x1: sx(bbox.xmin), y1: sy(t), x2: sx(bbox.xmax), y2: sy(t) };
 }
 
-export default function DecisionTreeViz() {
+// 2. 'export default'를 지우고 일반 함수로 선언합니다. 글로벌 스코프에 등록되어 index.html이 읽을 수 있게 됩니다.
+function DecisionTreeViz() {
   const [maxDepth, setMaxDepth] = useState(3);
   const { root, steps, leafCount, treeDepth } = useMemo(() => {
     _uid = 0;
@@ -276,7 +265,6 @@ export default function DecisionTreeViz() {
   const revealed = new Set(s.revealed);
   const activeTest = s.testId ? TEST.find((t) => t.id === s.testId) : null;
 
-  // 트리 픽셀 좌표 (깊이/리프 수에 따라 가변)
   const TROW = 92, TCOLW = 116, TMX = 56, TMY = 36, BW = 92, BH = 50;
   const tx = (n) => TMX + n.lx * TCOLW;
   const ty = (n) => TMY + n.ly * TROW + BH / 2;
@@ -351,11 +339,9 @@ export default function DecisionTreeViz() {
       <div className="narr" style={{ marginBottom: 14 }}>{s.narr}</div>
 
       <div className="grid">
-        {/* ===== 왼쪽: 2D 평면 ===== */}
         <div className="card" style={{ padding: 12 }}>
           <div className="eyebrow" style={{ marginBottom: 6 }}>특성 평면 (x1, x2)</div>
           <svg viewBox={`0 0 ${PW} ${PH}`} style={{ width: "100%", display: "block" }}>
-            {/* 격자 */}
             {[...Array(DMAX + 1)].map((_, k) => (
               <g key={k}>
                 <line x1={sx(k)} y1={sy(0)} x2={sx(k)} y2={sy(DMAX)} stroke={GRID} strokeWidth={k % 4 === 0 ? 1.2 : 0.6} />
@@ -367,20 +353,17 @@ export default function DecisionTreeViz() {
             <text x={sx(DMAX)} y={sy(0) + 22} textAnchor="end" fontSize="11" fill={SUB} className="mono">x1 →</text>
             <text x={sx(0) - 28} y={sy(DMAX) + 3} fontSize="11" fill={SUB} className="mono">x2↑</text>
 
-            {/* 확정 리프 영역 음영 */}
             {[...committedLeaves].map((id) => {
               const n = nodeById[id]; const b = n.bbox;
               return <rect key={"r" + id} x={sx(b.xmin)} y={sy(b.ymax)} width={sx(b.xmax) - sx(b.xmin)} height={sy(b.ymin) - sy(b.ymax)}
                 fill={n.pred === 0 ? C0 : C1} opacity={0.12} />;
             })}
 
-            {/* 확정된 분기 경계 (실선) */}
             {[...committedSplits].map((id) => {
               const n = nodeById[id]; const l = boundaryLine(n.split.f, n.split.t, n.bbox);
               return <line key={"b" + id} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} stroke={INK} strokeWidth={2.2} strokeLinecap="round" />;
             })}
 
-            {/* 현재 검사 중인 후보 경계 (보라 점선) */}
             {s.kind === "cand" && ledgerNode && (() => {
               const c = ledgerNode.cands[s.cand]; const l = boundaryLine(c.f, c.t, ledgerNode.bbox);
               return <line x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} stroke={ACCENT} strokeWidth={2.6} strokeDasharray="6 5" strokeLinecap="round">
@@ -391,7 +374,6 @@ export default function DecisionTreeViz() {
               return <line x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} stroke={OK} strokeWidth={3} strokeLinecap="round" />;
             })()}
 
-            {/* 학습 데이터 점 */}
             {TRAIN.map((p) => {
               const isFocus = (s.phase === "train" && (s.kind === "arrive" || s.kind === "cand" || s.kind === "choose"));
               const inNode = focus.has(p.id);
@@ -404,7 +386,6 @@ export default function DecisionTreeViz() {
               );
             })}
 
-            {/* 테스트 데이터 점 (추론 단계) */}
             {s.phase === "infer" && TEST.map((t) => {
               const act = activeTest && activeTest.id === t.id;
               const done = s.kind === "result" && act;
@@ -428,13 +409,10 @@ export default function DecisionTreeViz() {
           </div>
         </div>
 
-        {/* ===== 오른쪽: 트리 + 지니 원장 ===== */}
         <div className="pair">
-          {/* 트리 */}
           <div className="card" style={{ padding: 12 }}>
             <div className="eyebrow" style={{ marginBottom: 6 }}>결정트리</div>
             <svg viewBox={`0 0 ${TW} ${TH}`} style={{ width: "100%", display: "block" }}>
-              {/* 간선 */}
               {Object.values(nodeById).filter((n) => !n.leaf).map((n) =>
                 [["left", n.left, "예 (<)"], ["right", n.right, "아니오 (≥)"]].map(([k, ch, lab]) => {
                   if (!revealed.has(ch.id) || !committedSplits.has(n.id)) return null;
@@ -450,7 +428,6 @@ export default function DecisionTreeViz() {
                   );
                 })
               )}
-              {/* 노드 */}
               {Object.values(nodeById).map((n) => {
                 if (!revealed.has(n.id)) return null;
                 const x = tx(n), y = ty(n);
@@ -462,7 +439,6 @@ export default function DecisionTreeViz() {
                 return (
                   <g key={n.id}>
                     <rect x={x - BW / 2} y={y - BH / 2} width={BW} height={BH} rx={9} fill={fill} stroke={stroke} strokeWidth={active ? 2.6 : 1.5} />
-                    {/* 클래스 카운트 */}
                     <g className="mono">
                       <circle cx={x - 22} cy={y - 9} r={4} fill={C0} /><text x={x - 14} y={y - 5} fontSize="11" fill={INK}>{n.counts[0]}</text>
                       <circle cx={x + 6} cy={y - 9} r={4} fill={C1} /><text x={x + 14} y={y - 5} fontSize="11" fill={INK}>{n.counts[1]}</text>
@@ -475,7 +451,6 @@ export default function DecisionTreeViz() {
                   </g>
                 );
               })}
-              {/* 추론 토큰 */}
               {s.phase === "infer" && s.tokenNode && activeTest && (() => {
                 const n = nodeById[s.tokenNode];
                 return (
@@ -489,7 +464,6 @@ export default function DecisionTreeViz() {
             </svg>
           </div>
 
-          {/* 지니 원장 (학습) / 결과 카드 (추론) */}
           <div className="card" style={{ padding: 12, minHeight: 150, overflowX: "auto" }}>
             {s.phase === "train" && ledgerNode ? (
               <>
@@ -568,7 +542,6 @@ export default function DecisionTreeViz() {
         </div>
         <span className="mono" style={{ fontSize: 12, color: SUB }}>단계 {idx + 1} / {steps.length}</span>
       </div>
-      {/* 진행 바 */}
       <div style={{ height: 4, background: "#e7eaf0", borderRadius: 4, marginTop: 8, overflow: "hidden" }}>
         <div style={{ height: "100%", width: `${(idx / (steps.length - 1)) * 100}%`, background: ACCENT, transition: "width .3s" }} />
       </div>
