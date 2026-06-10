@@ -1,4 +1,3 @@
-// 1. 맨 위 import 구문을 지우고, CDN용 구조분해 할당으로 변경합니다.
 const { useState, useEffect, useMemo, useRef } = React;
 
 /* ============================================================
